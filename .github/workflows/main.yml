@@ -40,7 +40,8 @@ jobs:
       - name: Package Nomad job
         run: |
           mkdir -p artifacts
-          cp nomad/jobs/app.nomad artifacts/app.nomad
+          # FIX: Changed path from nomad/jobs/app.nomad to nomad/app.nomad
+          cp nomad/app.nomad artifacts/app.nomad
 
       - name: Copy Nomad job to droplet
         uses: appleboy/scp-action@v0.1.7
