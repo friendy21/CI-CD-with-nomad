@@ -1,8 +1,5 @@
 # Complete CI/CD Pipeline for Nomad and Consul
 
-**Author:** Manus AI  
-**Created:** December 8, 2024  
-**Version:** 1.0  
 
 ## Table of Contents
 
@@ -537,9 +534,4 @@ NIST Cybersecurity Framework offers comprehensive security guidance, risk manage
 CIS (Center for Internet Security) benchmarks provide security configuration guidelines for operating systems, applications, and infrastructure components. The benchmarks are available at [https://www.cisecurity.org/cis-benchmarks](https://www.cisecurity.org/cis-benchmarks).
 
 ---
-
-**Document Version:** 1.0  
-**Last Updated:** December 8, 2024  
-**Author:** Manus AI  
-**License:** MIT License
 
