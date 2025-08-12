@@ -19,15 +19,10 @@ RUN addgroup -g 1001 -S nodejs && \
 
 # builder stage …
 WORKDIR /app
-
-# copy both manifest + lockfile
 COPY package*.json ./
-# REMOVE this if you’re not using yarn:
-# COPY yarn.lock* ./
+RUN npm ci --omit=dev --no-audit --no-fund
+COPY . .
 
-# install deps (production only)
-# For npm v8+ the modern flag is --omit=dev
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 
 # Install dependencies with security audit
