@@ -17,12 +17,18 @@ RUN apk update && apk upgrade && \
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Set working directory
+# builder stage …
 WORKDIR /app
 
-# Copy package files first for better caching
+# copy both manifest + lockfile
 COPY package*.json ./
-COPY yarn.lock* ./
+# REMOVE this if you’re not using yarn:
+# COPY yarn.lock* ./
+
+# install deps (production only)
+# For npm v8+ the modern flag is --omit=dev
+RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+
 
 # Install dependencies with security audit
 RUN npm ci --only=production --no-audit --no-fund && \
