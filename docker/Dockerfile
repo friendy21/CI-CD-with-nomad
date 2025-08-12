@@ -1,26 +1,26 @@
-# Simple working Dockerfile for Node.js app
+# docker/Dockerfile
 FROM node:18-alpine
 
 # Install curl for health checks
 RUN apk add --no-cache curl
 
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Copy package.json only (not package-lock.json since it's invalid)
+COPY package.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Use npm install instead of npm ci (since we don't have valid package-lock.json)
+RUN npm install --only=production
 
 # Copy application files
 COPY server.js ./
 
-# Create health check endpoint
-EXPOSE 3000
-
-# Use the correct port
+# Set the port
 ENV PORT=3000
+
+# Expose the port
+EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
