@@ -1,18 +1,20 @@
-name: ci-cd-nomad
+# .github/workflows/deploy.yml
+name: CI/CD Pipeline
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  DOCKER_BUILDKIT: 1
+  REGISTRY: docker.io
+  IMAGE_NAME: cicd-nomad-app
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
@@ -24,16 +26,16 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/cicd-nomad-app
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
 
-      - name: Build and push
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -43,23 +45,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
 
-      - name: Prepare artifact (Nomad job)
+      - name: Prepare Nomad job file
         run: |
           mkdir -p artifacts
-          # Adjust this path if your job file is different:
           cp nomad/jobs/app.nomad artifacts/app.nomad
+          echo "Prepared Nomad job file"
 
-      - name: Copy files to droplet
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DO_SSH_HOST }}
-          username: ${{ secrets.DO_SSH_USER }}
-          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
-          source: "artifacts/app.nomad"
-          target: "/root/ci/"
-
-      - name: Deploy on Nomad
+      - name: Deploy to server
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.DO_SSH_HOST }}
@@ -67,12 +63,49 @@ jobs:
           key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
           script: |
             set -e
-            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/cicd-nomad-app:latest"
+            echo "Creating directories..."
+            mkdir -p /root/ci/artifacts
+            
+            echo "Cleaning old files..."
+            rm -f /root/ci/artifacts/app.nomad || true
+
+      - name: Copy Nomad job to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DO_SSH_HOST }}
+          username: ${{ secrets.DO_SSH_USER }}
+          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+          source: "artifacts/app.nomad"
+          target: "/root/ci/"
+          strip_components: 0
+
+      - name: Deploy with Nomad
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_SSH_HOST }}
+          username: ${{ secrets.DO_SSH_USER }}
+          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            
+            # Set the Docker image in the Nomad job file
+            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+            echo "Deploying image: $IMAGE"
+            
+            # Replace the placeholder with actual image
             sed -i "s|REPLACE_IMAGE|$IMAGE|g" /root/ci/artifacts/app.nomad
-
-            # Optional env if using ACLs:
-            if [ -n "${{ secrets.NOMAD_ADDR }}" ]; then export NOMAD_ADDR="${{ secrets.NOMAD_ADDR }}"; fi
-            if [ -n "${{ secrets.NOMAD_TOKEN }}" ]; then export NOMAD_TOKEN="${{ secrets.NOMAD_TOKEN }}"; fi
-
-            # Register or update job
+            
+            # Validate the job file
+            echo "Validating Nomad job..."
+            nomad job validate /root/ci/artifacts/app.nomad
+            
+            # Run the job
+            echo "Deploying to Nomad..."
             nomad job run -detach /root/ci/artifacts/app.nomad
+            
+            # Wait a moment for job to start
+            sleep 5
+            
+            # Check job status
+            echo "Checking job status..."
+            nomad job status app || true
