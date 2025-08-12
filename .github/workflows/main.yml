@@ -4,62 +4,152 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  DOCKERHUB_USERNAME: friendy21
+  IMAGE_NAME: cicd-nomad-app
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/cicd-nomad-app
+          images: ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest
             type=sha,format=long
 
-      - name: Build and push
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./docker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+      - name: Setup SSH with proper key format
+        run: |
+          # Create SSH directory
+          mkdir -p ~/.ssh
+          
+          # Write the private key with proper formatting
+          cat << 'PRIVATE_KEY_EOF' > ~/.ssh/deploy_key
+          ${{ secrets.DO_SSH_PRIVATE_KEY }}
+          PRIVATE_KEY_EOF
+          
+          # Fix permissions
+          chmod 600 ~/.ssh/deploy_key
+          
+          # Add known hosts
+          ssh-keyscan -H 137.184.198.14 >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H 137.184.85.0 >> ~/.ssh/known_hosts 2>/dev/null || true
+          
+          # Test SSH connection
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@137.184.198.14 "echo 'SSH connection successful'" || echo "SSH test failed"
 
       - name: Package Nomad job
         run: |
           mkdir -p artifacts
-          # FIX: Changed path from nomad/jobs/app.nomad to nomad/app.nomad
           cp nomad/app.nomad artifacts/app.nomad
+          sed -i "s|REPLACE_IMAGE|${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest|g" artifacts/app.nomad
+          echo "Nomad job prepared with image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
 
-      - name: Copy Nomad job to droplet
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DO_SSH_HOST }}
-          username: ${{ secrets.DO_SSH_USER }}
-          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
-          source: "artifacts/app.nomad"
-          target: "/root/ci/"
+      - name: Deploy via direct SSH (Alternative to SCP action)
+        run: |
+          # Create remote directory
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@137.184.198.14 "mkdir -p /root/ci/artifacts"
+          
+          # Copy file using native scp
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no artifacts/app.nomad root@137.184.198.14:/root/ci/artifacts/app.nomad
+          
+          echo "File copied successfully"
 
-      - name: Deploy on Nomad
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DO_SSH_HOST }}
-          username: ${{ secrets.DO_SSH_USER }}
-          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
-          script: |
-            set -e
-            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/cicd-nomad-app:latest"
-            sed -i "s|REPLACE_IMAGE|$IMAGE|g" /root/ci/artifacts/app.nomad
-            nomad job run -detach /root/ci/artifacts/app.nomad
+      - name: Deploy on Primary Nomad Server
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@137.184.198.14 << 'ENDSSH'
+          set -e
+          
+          # Check if Nomad is running
+          if ! systemctl is-active --quiet nomad; then
+            echo "Starting Nomad service..."
+            systemctl start nomad
+            sleep 10
+          fi
+          
+          # Check if Docker is running
+          if ! systemctl is-active --quiet docker; then
+            echo "Starting Docker service..."
+            systemctl start docker
+            sleep 5
+          fi
+          
+          # Validate the job file
+          echo "Validating Nomad job..."
+          if nomad job validate /root/ci/artifacts/app.nomad; then
+            echo "✓ Job validation successful"
+          else
+            echo "✗ Job validation failed"
+            cat /root/ci/artifacts/app.nomad
+            exit 1
+          fi
+          
+          # Run the job
+          echo "Deploying to Nomad..."
+          nomad job run -detach /root/ci/artifacts/app.nomad
+          
+          # Wait for deployment
+          sleep 10
+          
+          # Check job status
+          echo "Checking deployment status..."
+          nomad job status app || true
+          
+          # Check allocations
+          echo "Checking allocations..."
+          nomad job allocs app || true
+          ENDSSH
+
+      - name: Verify deployment health
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@137.184.198.14 << 'ENDSSH'
+          set -e
+          echo "Waiting for service to be healthy..."
+          
+          # Wait up to 60 seconds for the service to be healthy
+          for i in {1..12}; do
+            if curl -f http://localhost:3000/health 2>/dev/null; then
+              echo "✓ Service is healthy!"
+              curl http://localhost:3000/
+              exit 0
+            fi
+            echo "Waiting for service... ($i/12)"
+            sleep 5
+          done
+          
+          echo "⚠ Service health check timed out"
+          echo "Checking Docker containers:"
+          docker ps -a
+          echo "Checking Nomad job details:"
+          nomad job status app
+          exit 1
+          ENDSSH
