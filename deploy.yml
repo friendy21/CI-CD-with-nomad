@@ -1,0 +1,324 @@
+name: CI/CD Pipeline for Nomad and Consul
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Manual trigger
+
+env:
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+  REGISTRY: docker.io
+  IMAGE_NAME: friendy21/nomad-app
+
+jobs:
+  # Security scanning job
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Build and test job
+  build-test:
+    runs-on: ubuntu-latest
+    needs: security-scan
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=host
+            image=moby/buildkit:latest
+      
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: friendy21
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Nomad Application
+            org.opencontainers.image.description=Application deployed via Nomad
+            org.opencontainers.image.vendor=friendy21
+      
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            COMMIT_SHA=${{ github.sha }}
+      
+      - name: Run Trivy on Docker image
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'docker-trivy-results.sarif'
+      
+      - name: Upload Docker scan results
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'docker-trivy-results.sarif'
+
+  # Deploy to staging environment
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment:
+      name: staging
+      url: http://${{ secrets.DO_STAGING_HOST }}:4646
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH for staging
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.DO_STAGING_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: Deploy to staging Nomad
+        run: |
+          # Prepare Nomad job file for staging
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" nomad/app-staging.nomad.hcl
+          sed -i "s|DOCKER_IMAGE|${{ env.IMAGE_NAME }}|g" nomad/app-staging.nomad.hcl
+          
+          # Copy and deploy
+          scp -i ~/.ssh/id_rsa nomad/app-staging.nomad.hcl root@${{ secrets.DO_STAGING_HOST }}:/tmp/
+          ssh -i ~/.ssh/id_rsa root@${{ secrets.DO_STAGING_HOST }} "
+            nomad job validate /tmp/app-staging.nomad.hcl &&
+            nomad job run /tmp/app-staging.nomad.hcl &&
+            rm /tmp/app-staging.nomad.hcl
+          "
+
+  # Deploy to production environment
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    environment:
+      name: production
+      url: https://your-domain.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH for production
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # Add both servers to known hosts
+          ssh-keyscan -H 137.184.198.14 >> ~/.ssh/known_hosts
+          ssh-keyscan -H 137.184.85.0 >> ~/.ssh/known_hosts
+      
+      - name: Prepare Nomad job files
+        run: |
+          # Replace placeholders in Nomad job files
+          for file in nomad/*.nomad.hcl; do
+            sed -i "s|IMAGE_TAG|${{ github.sha }}|g" "$file"
+            sed -i "s|DOCKER_IMAGE|${{ env.IMAGE_NAME }}|g" "$file"
+            sed -i "s|BUILD_VERSION|${{ github.run_number }}|g" "$file"
+          done
+      
+      - name: Deploy to primary server (137.184.198.14)
+        run: |
+          # Copy Nomad job files to primary server
+          scp -i ~/.ssh/id_rsa nomad/*.nomad.hcl root@137.184.198.14:/tmp/
+          
+          # Deploy to primary server
+          ssh -i ~/.ssh/id_rsa root@137.184.198.14 << 'EOF'
+            cd /tmp
+            
+            # Validate all job files
+            for job in *.nomad.hcl; do
+              echo "Validating $job..."
+              nomad job validate "$job"
+            done
+            
+            # Deploy main application
+            echo "Deploying main application..."
+            nomad job run app.nomad.hcl
+            
+            # Deploy additional services if they exist
+            if [ -f consul-connect.nomad.hcl ]; then
+              nomad job run consul-connect.nomad.hcl
+            fi
+            
+            if [ -f traefik.nomad.hcl ]; then
+              nomad job run traefik.nomad.hcl
+            fi
+            
+            # Wait for deployment to stabilize
+            sleep 30
+            
+            # Check deployment status
+            nomad job status app
+            
+            # Cleanup
+            rm -f *.nomad.hcl
+          EOF
+      
+      - name: Deploy to secondary server (137.184.85.0)
+        run: |
+          # Copy Nomad job files to secondary server
+          scp -i ~/.ssh/id_rsa nomad/*.nomad.hcl root@137.184.85.0:/tmp/
+          
+          # Deploy to secondary server
+          ssh -i ~/.ssh/id_rsa root@137.184.85.0 << 'EOF'
+            cd /tmp
+            
+            # Validate all job files
+            for job in *.nomad.hcl; do
+              echo "Validating $job..."
+              nomad job validate "$job"
+            done
+            
+            # Deploy main application
+            echo "Deploying main application..."
+            nomad job run app.nomad.hcl
+            
+            # Wait for deployment to stabilize
+            sleep 30
+            
+            # Check deployment status
+            nomad job status app
+            
+            # Cleanup
+            rm -f *.nomad.hcl
+          EOF
+      
+      - name: Verify deployment health
+        run: |
+          # Check health on both servers
+          for server in 137.184.198.14 137.184.85.0; do
+            echo "Checking health on $server..."
+            ssh -i ~/.ssh/id_rsa root@$server << 'EOF'
+              # Check Nomad cluster status
+              nomad node status
+              
+              # Check job status
+              nomad job status app
+              
+              # Check allocation health
+              nomad job allocs app | head -10
+              
+              # Check Consul services
+              consul catalog services
+              
+              # Check if application is responding
+              if command -v curl >/dev/null 2>&1; then
+                curl -f http://localhost:8080/health || echo "Health check failed"
+              fi
+            EOF
+          done
+      
+      - name: Cleanup SSH
+        if: always()
+        run: |
+          rm -rf ~/.ssh/id_rsa
+
+  # Rollback job (manual trigger only)
+  rollback:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+    
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DO_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H 137.184.198.14 >> ~/.ssh/known_hosts
+          ssh-keyscan -H 137.184.85.0 >> ~/.ssh/known_hosts
+      
+      - name: Rollback deployment on both servers
+        run: |
+          for server in 137.184.198.14 137.184.85.0; do
+            echo "Rolling back on $server..."
+            ssh -i ~/.ssh/id_rsa root@$server << 'EOF'
+              # Get current deployment version
+              nomad job deployments app
+              
+              # Revert to previous version
+              nomad job revert app 1
+              
+              # Check status after rollback
+              nomad job status app
+            EOF
+          done
+
+  # Monitoring and notification job
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Notify deployment status
+        run: |
+          if [ "${{ needs.deploy-production.result }}" == "success" ]; then
+            echo "✅ Deployment successful to production"
+            # Add webhook notification here if needed
+          else
+            echo "❌ Deployment failed"
+            # Add failure notification here if needed
+          fi
+
