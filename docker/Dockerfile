@@ -1,30 +1,29 @@
-# docker/Dockerfile
 FROM node:18-alpine
 
 # Install curl for health checks
 RUN apk add --no-cache curl
 
-# Set working directory
 WORKDIR /app
 
-# Copy package.json only (not package-lock.json since it's invalid)
-COPY package.json ./
+# Copy package files
+COPY package*.json ./
 
-# Use npm install instead of npm ci (since we don't have valid package-lock.json)
-RUN npm install --only=production
+# Install dependencies
+RUN npm ci --only=production
 
 # Copy application files
 COPY server.js ./
 
-# Set the port
+# Set environment variables
 ENV PORT=3000
+ENV NODE_ENV=production
 
-# Expose the port
+# Expose port
 EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000/health || exit 1
 
-# Start the application
+# Run application
 CMD ["node", "server.js"]
