@@ -5,12 +5,20 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "echo \"No tests specified - skipping\" && exit 0",
+    "clean": "rm -rf node_modules package-lock.json",
+    "reinstall": "npm run clean && npm install"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "4.19.2"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "overrides": {
+    "methods": "1.1.2",
+    "inherits": "2.0.4",
+    "merge-descriptors": "1.0.1",
+    "cookie": "0.6.0"
   }
 }
