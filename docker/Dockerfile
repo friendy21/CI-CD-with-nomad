@@ -1,13 +1,19 @@
-# Multi-stage build for security and optimization
-# Stage 1: Dependencies
+# docker/Dockerfile
+# Multi-stage build with npm install fallback
 FROM node:18-alpine AS deps
 WORKDIR /app
-COPY package*.json ./
-# Use npm ci with correct flag for production dependencies
-RUN npm ci --omit=dev && npm cache clean --force
 
-# Stage 2: Production
+# Copy package.json only (not package-lock.json to avoid conflicts)
+COPY package.json ./
+
+# Install dependencies with fallback options
+RUN npm cache clean --force && \
+    npm install --verbose --no-package-lock || \
+    npm install --force --no-package-lock
+
+# Production stage
 FROM node:18-alpine AS production
+
 # Install curl for health checks and create non-root user
 RUN apk add --no-cache curl tini && \
     addgroup -g 1001 -S nodejs && \
@@ -19,7 +25,7 @@ WORKDIR /app
 COPY --from=deps --chown=nodejs:nodejs /app/node_modules ./node_modules
 
 # Copy application files
-COPY --chown=nodejs:nodejs package*.json ./
+COPY --chown=nodejs:nodejs package.json ./
 COPY --chown=nodejs:nodejs server.js ./
 
 # Set environment variables
@@ -32,7 +38,7 @@ USER nodejs
 # Expose port
 EXPOSE 3000
 
-# Health check with proper timeout and interval
+# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000/health || exit 1
 
