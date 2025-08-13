@@ -1,13 +1,16 @@
 {
   "name": "cicd-nomad-app",
   "version": "1.0.0",
-  "private": true,
+  "description": "Nomad + Consul application with CI/CD",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "echo \"no build step\""
+    "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {
     "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
